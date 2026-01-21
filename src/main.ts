@@ -1,6 +1,6 @@
-// main.ts
-import { Hono } from "hono";
-import { cors } from "hono/cors";
+import { Hono } from "npm:hono";
+import { cors } from "npm:hono/cors";
+import { MongoClient } from "npm:mongodb"; // 👈 Added MongoDB Driver
 import {
   calculateWalsForUpload,
   uploadToWalrus,
@@ -9,62 +9,119 @@ import {
 
 const app = new Hono();
 
+// --- CONFIGURATION ---
+const MONGO_URI = Deno.env.get("MONGO_URI");
+const DB_NAME = "mothrbox_db";
+const COLLECTION_NAME = "user_files";
+
+if (!MONGO_URI)
+  console.warn("⚠️ Warning: MONGO_URI not set. DB saves will fail.");
+
+// --- DATABASE CONNECTION ---
+// We use a cached client to avoid reconnecting on every request
+let dbClient: MongoClient | null = null;
+
+async function getDb() {
+  if (dbClient) return dbClient.db(DB_NAME);
+
+  if (!MONGO_URI) throw new Error("Database URI missing");
+
+  const client = new MongoClient(MONGO_URI);
+  await client.connect();
+  dbClient = client;
+  console.log("✅ Connected to MongoDB Atlas");
+  return dbClient.db(DB_NAME);
+}
+
 // Enable CORS
 app.use("*", cors({ origin: "https://mothrbox.vercel.app" }));
 
-app.get("/", (c) => c.json({ message: "Mothrbox Walrus API Active" }));
+app.get("/", (c) => c.json({ message: "Mothrbox API + MongoDB Active" }));
 
-// --- NEW UPLOAD ROUTE ---
+// --- 1. UPLOAD ROUTE (Updated) ---
 app.post("/upload", async (c) => {
   try {
-    // 1. Parse Multipart Form Data
     const body = await c.req.parseBody();
     const file = body["file"];
     const userAddress = body["userAddress"] as string;
+    // We expect the frontend to tell us which algo was used, default to AES if missing
+    const algorithm = (body["algorithm"] as string) || "AES-256-GCM";
 
-    // Validate Input
     if (!file || !(file instanceof File)) {
-      return c.json({ error: "Missing 'file' field or invalid file" }, 400);
+      return c.json({ error: "Missing 'file' field" }, 400);
     }
     if (!userAddress) {
-      return c.json({ error: "Missing 'userAddress' field" }, 400);
+      return c.json({ error: "Missing 'userAddress'" }, 400);
     }
 
-    console.log(`Processing upload: ${file.name} (${file.size} bytes)`);
+    console.log(`Processing: ${file.name} (${file.size} bytes)`);
 
-    // 2. Convert File to Uint8Array for Walrus SDK
+    // A. Convert File
     const arrayBuffer = await file.arrayBuffer();
     const fileBytes = new Uint8Array(arrayBuffer);
 
-    // 3. Upload to Walrus (Backend pays storage)
+    // B. Upload to Walrus
     const blobId = await uploadToWalrus(fileBytes, file.name);
-    console.log(`✅ Uploaded to Walrus. Blob ID: ${blobId}`);
+    console.log(`✅ Walrus Blob ID: ${blobId}`);
 
-    // 4. Mint Receipt NFT on Sui (Backend pays gas)
-    //    We pass the mime type (e.g. "image/png") so the receipt has metadata
+    // C. Mint Receipt on Sui
     const txDigest = await mintBlobReceipt(blobId, file.type, userAddress);
-    console.log(`✅ Minted Receipt. Digest: ${txDigest}`);
+    console.log(`✅ Sui Mint Digest: ${txDigest}`);
 
-    // 5. Return Success
+    // D. Save Metadata to MongoDB 👈 NEW STEP
+    try {
+      const db = await getDb();
+      const newDoc = {
+        ownerAddress: userAddress,
+        fileName: file.name.replace(".enc", ""), // Remove .enc extension for display if desired
+        fileSize: file.size,
+        algorithm: algorithm,
+        blobId: blobId,
+        txDigest: txDigest,
+        status: "Encrypted",
+        uploadDate: new Date(),
+        mimeType: file.type,
+      };
+
+      await db.collection(COLLECTION_NAME).insertOne(newDoc);
+      console.log("✅ Saved to MongoDB");
+    } catch (dbError) {
+      console.error("❌ DB Save Failed:", dbError);
+      // We don't fail the request if DB fails, because the blockchain part succeeded
+    }
+
     return c.json({
       success: true,
       blobId,
       txDigest,
-      message: "File stored securely and ownership receipt sent to wallet.",
+      message: "File secure, receipt minting, and metadata saved.",
     });
   } catch (err: any) {
     console.error("Upload failed:", err);
-    return c.json(
-      {
-        success: false,
-        error: err.message || "Internal Server Error",
-      },
-      500,
-    );
+    return c.json({ success: false, error: err.message }, 500);
   }
 });
 
-// ... (Keep your existing /storage-cost route here) ...
+// --- 2. GET USER FILES ROUTE (New) ---
+// Call this from your Dashboard to populate the table
+app.get("/files/:address", async (c) => {
+  try {
+    const address = c.req.param("address");
+    const db = await getDb();
+
+    const files = await db
+      .collection(COLLECTION_NAME)
+      .find({ ownerAddress: address })
+      .sort({ uploadDate: -1 }) // Newest first
+      .toArray();
+
+    return c.json(files);
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500);
+  }
+});
+
+// --- 3. STORAGE COST ROUTE (Existing) ---
 app.get("/storage-cost", async (c) => {
   const sizeParam = c.req.query("fileSize");
   const epochsParam = c.req.query("epochs");
@@ -73,7 +130,6 @@ app.get("/storage-cost", async (c) => {
 
   const fileSizeBytes = Number(sizeParam);
   const epochs = epochsParam ? Number(epochsParam) : 3;
-
   const costs = await calculateWalsForUpload(fileSizeBytes, epochs);
 
   return c.json({
