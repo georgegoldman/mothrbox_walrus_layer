@@ -1,0 +1,74 @@
+# MothrBox .gitignore
+
+# Environment variables (contains secrets!)
+.env
+.env.local
+.env.production
+.env.*.local
+
+# User data directory (encrypted/decrypted files)
+data/
+*.enc
+
+# Private keys (NEVER commit these!)
+*.key
+*.pem
+private_key*
+*_private.key
+
+# Logs
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Docker volumes
+volumes/
+
+# OS files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Editor files
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Node modules
+node_modules/
+
+# Rust
+target/
+Cargo.lock
+**/*.rs.bk
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Backup files
+*.backup
+*.bak
+backup_*/
+
+# Blob ID registries (may contain sensitive info)
+blob_registry.csv
+*_backups.csv
+
+# Test files
+test_*.txt
+test_*.pdf
+test_*.jpg
+test_*.png
+
+# Build artifacts
+dist/
+build/
+*.tar.gz
+*.zip

@@ -1,0 +1,46 @@
+# Docker ignore file for mothrbox_ts
+# Save this as: mothrbox_ts/.dockerignore
+
+# Environment files (user provides their own .env)
+.env
+
+# Git
+.git
+.gitignore
+
+# Node/Deno dependencies
+node_modules
+.deno
+
+# IDE and editor files
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+npm-debug.log*
+
+# Test files
+test-*.ts
+*_test.ts
+*.test.ts
+
+# Documentation (optional - remove if you want docs in image)
+README.md
+docs/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+.env
+.env.*

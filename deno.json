@@ -1,0 +1,18 @@
+{
+  "imports": {
+    "@grpc/grpc-js": "npm:@grpc/grpc-js@^1.14.1",
+    "@mysten/bcs": "npm:@mysten/bcs@^1.9.2",
+    "@mysten/sui": "npm:@mysten/sui@^1.45.0",
+    "@mysten/walrus": "npm:@mysten/walrus@^0.8.4",
+    "hono": "jsr:@hono/hono@^4.10.6"
+  },
+  "tasks": {
+    "start": "deno run --allow-net --allow-read --allow-env --allow-write --allow-sys --env-file --watch src/main.ts",
+    "test": "deno test --allow-net --allow-read --allow-env --allow-write --allow-sys --env-file test/walrus.test.ts"
+  },
+  "compilerOptions": {
+    "jsx": "precompile",
+    "jsxImportSource": "hono/jsx"
+  },
+  "nodeModulesDir": "auto"
+}
