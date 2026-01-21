@@ -34,7 +34,21 @@ async function getDb() {
 }
 
 // Enable CORS
-app.use("*", cors({ origin: "https://mothrbox.vercel.app" }));
+app.use(
+  "*",
+  cors({
+    origin: (origin) => {
+      // Allow Localhost and Production
+      if (
+        origin.includes("localhost") ||
+        origin.includes("mothrbox.vercel.app")
+      ) {
+        return origin;
+      }
+      return "https://mothrbox.vercel.app"; // Fallback
+    },
+  }),
+);
 
 app.get("/", (c) => c.json({ message: "Mothrbox API + MongoDB Active" }));
 
