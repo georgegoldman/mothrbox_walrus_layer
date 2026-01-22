@@ -2,8 +2,8 @@ import { Hono } from "npm:hono";
 import { cors } from "npm:hono/cors";
 import { MongoClient } from "npm:mongodb";
 import {
-  uploadToWalrus, // 👈 Using YOUR function
-  mintBlobReceipt,
+  mintBlobReceipt, // 👈 Keep this (Lightweight)
+  // uploadToWalrus, // ❌ REMOVE THIS (Too heavy for Deno Free Tier)
   calculateWalsForUpload,
 } from "./walrus-client.ts";
 
@@ -13,23 +13,9 @@ const app = new Hono();
 const MONGO_URI = Deno.env.get("MONGO_URI");
 const DB_NAME = "mothrbox_db";
 const COLLECTION_NAME = "user_files";
+const WALRUS_PUBLISHER = "https://publisher.walrus-testnet.walrus.space";
 
-if (!MONGO_URI) console.warn("⚠️ Warning: MONGO_URI not set.");
-
-// --- DATABASE CONNECTION ---
-let dbClient: MongoClient | null = null;
-
-async function getDb() {
-  if (dbClient) return dbClient.db(DB_NAME);
-  if (!MONGO_URI) throw new Error("Database URI missing");
-  const client = new MongoClient(MONGO_URI);
-  await client.connect();
-  dbClient = client;
-  console.log("✅ Connected to MongoDB Atlas");
-  return dbClient.db(DB_NAME);
-}
-
-// --- MIDDLEWARE ---
+// --- CORS ---
 app.use(
   "*",
   cors({
@@ -45,98 +31,103 @@ app.use(
   }),
 );
 
-// --- UPLOAD ROUTE ---
+// --- DATABASE (Safe Connection) ---
+let dbClient: MongoClient | null = null;
+async function getDb() {
+  if (dbClient) return dbClient.db(DB_NAME);
+  if (!MONGO_URI) {
+    console.error("❌ MONGO_URI missing.");
+    return null;
+  }
+  try {
+    const client = new MongoClient(MONGO_URI);
+    await client.connect();
+    dbClient = client;
+    return dbClient.db(DB_NAME);
+  } catch (err) {
+    console.error("❌ DB Connection Failed:", err);
+    return null;
+  }
+}
+
+// --- UPLOAD ROUTE (Streaming Fix) ---
 app.post("/upload", async (c) => {
   try {
-    // 1. Get Metadata from URL Query (Frontend sends these in URL)
+    // 1. Get Metadata from URL
     const userAddress = c.req.query("userAddress");
     const fileName = c.req.query("fileName") || "unknown.enc";
     const algorithm = c.req.query("algorithm") || "AES-256-GCM";
 
-    if (!userAddress) {
-      return c.json({ error: "Missing 'userAddress' query param" }, 400);
+    if (!userAddress) return c.json({ error: "Missing userAddress" }, 400);
+
+    console.log(`Stream Request: ${fileName} for ${userAddress}`);
+
+    // 2. Get the stream (DO NOT await arrayBuffer!)
+    const bodyStream = c.req.raw.body;
+    if (!bodyStream) return c.json({ error: "No body" }, 400);
+
+    // 3. STREAM to Walrus (Bypasses CPU Limit)
+    // We stream directly to the publisher HTTP API.
+    // This effectively uses 0 CPU on your backend.
+    const walrusRes = await fetch(`${WALRUS_PUBLISHER}/v1/blobs?epochs=3`, {
+      method: "PUT",
+      body: bodyStream,
+    });
+
+    if (!walrusRes.ok) {
+      const txt = await walrusRes.text();
+      throw new Error(`Walrus Upload Failed: ${txt}`);
     }
 
-    console.log(`Processing Upload: ${fileName} for ${userAddress}`);
+    const walrusJson = await walrusRes.json();
+    // Support both response formats (newlyCreated or direct)
+    const blobId =
+      walrusJson.newlyCreated?.blobObject?.blobId ||
+      walrusJson.blobId ||
+      walrusJson.id;
 
-    // 2. Read Request Body into Memory
-    // We need the full Uint8Array because your uploadToWalrus function requires it.
-    const arrayBuffer = await c.req.arrayBuffer();
-    const fileBytes = new Uint8Array(arrayBuffer);
+    if (!blobId) throw new Error("Walrus did not return a Blob ID");
 
-    if (fileBytes.length === 0) {
-      return c.json({ error: "Empty file body" }, 400);
-    }
+    console.log(`✅ Upload Success. Blob ID: ${blobId}`);
 
-    // 3. Upload to Walrus (Using YOUR walrus-client.ts)
-    // This uses your backend wallet to pay for storage
-    const blobId = await uploadToWalrus(fileBytes, fileName);
-    console.log(`✅ Walrus Blob ID: ${blobId}`);
-
-    // 4. Mint Receipt on Sui (Using YOUR walrus-client.ts)
+    // 4. Mint Receipt (Your Backend Signs This)
+    // This is safe to keep because signing one tx is low CPU.
     const txDigest = await mintBlobReceipt(
       blobId,
       "application/encrypted",
       userAddress,
     );
-    console.log(`✅ Sui Mint Digest: ${txDigest}`);
+    console.log(`✅ Receipt Minted: ${txDigest}`);
 
-    // 5. Save Metadata to MongoDB
-    try {
-      const db = await getDb();
-      const newDoc = {
+    // 5. Save to DB
+    const db = await getDb();
+    if (db) {
+      await db.collection(COLLECTION_NAME).insertOne({
         ownerAddress: userAddress,
         fileName: fileName.replace(".enc", ""),
-        fileSize: fileBytes.length,
+        fileSize: walrusJson.newlyCreated?.blobObject?.size || 0,
         algorithm: algorithm,
         blobId: blobId,
         txDigest: txDigest,
         status: "Encrypted",
         uploadDate: new Date(),
         mimeType: "application/encrypted",
-      };
-
-      await db.collection(COLLECTION_NAME).insertOne(newDoc);
-      console.log("✅ Saved to MongoDB");
-    } catch (dbError) {
-      console.error("❌ DB Save Failed:", dbError);
+      });
     }
 
     return c.json({
       success: true,
       blobId,
       txDigest,
-      message: "File stored securely and receipt minted.",
+      message: "File streamed and receipt minted.",
     });
   } catch (err: any) {
-    console.error("Upload failed:", err);
+    console.error("Server Error:", err);
     return c.json({ success: false, error: err.message }, 500);
   }
 });
 
-// --- STORAGE COST ROUTE ---
-app.get("/storage-cost", async (c) => {
-  const sizeParam = c.req.query("fileSize");
-  const epochsParam = c.req.query("epochs");
-
-  if (!sizeParam) return c.json({ error: "fileSize required" }, 400);
-
-  const fileSizeBytes = Number(sizeParam);
-  const epochs = epochsParam ? Number(epochsParam) : 3;
-
-  try {
-    const costs = await calculateWalsForUpload(fileSizeBytes, epochs);
-    return c.json({
-      fileSizeBytes,
-      epochs,
-      totalCost: costs.totalCost.toString(),
-      totalCostInSui: costs.totalCostInSui,
-      totalCostInUsd: costs.totalCostInUsd,
-    });
-  } catch (err: any) {
-    return c.json({ error: err.message }, 500);
-  }
-});
+// ... Keep storage-cost route ...
 
 const port = Number(Deno.env.get("PORT") ?? 3000);
 Deno.serve({ port }, (req) => app.fetch(req));
