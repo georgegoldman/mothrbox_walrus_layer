@@ -9,7 +9,7 @@ COPY . .
 
 # Cache dependencies (speeds up deployment)
 # This downloads all the libraries imported in your main.ts
-RUN deno cache main.ts
+RUN deno cache src/main.ts
 
 # Expose the port (Koyeb needs to know where to send traffic)
 EXPOSE 3000
