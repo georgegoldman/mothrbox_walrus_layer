@@ -2,8 +2,8 @@ import { Hono } from "npm:hono";
 import { cors } from "npm:hono/cors";
 import { MongoClient } from "npm:mongodb";
 import {
-  mintBlobReceipt, // 👈 Keep this (Lightweight)
-  // uploadToWalrus, // ❌ REMOVE THIS (Too heavy for Deno Free Tier)
+  mintBlobReceipt,
+  uploadToWalrus, // 👈 Re-enabled SDK function
   calculateWalsForUpload,
 } from "./walrus-client.ts";
 
@@ -13,7 +13,7 @@ const app = new Hono();
 const MONGO_URI = Deno.env.get("MONGO_URI");
 const DB_NAME = "mothrbox_db";
 const COLLECTION_NAME = "user_files";
-const WALRUS_PUBLISHER = "https://publisher.walrus-testnet.walrus.space";
+// Note: WALRUS_PUBLISHER is removed because the SDK handles the connection
 
 // --- CORS ---
 app.use(
@@ -50,7 +50,7 @@ async function getDb() {
   }
 }
 
-// --- UPLOAD ROUTE (Streaming Fix) ---
+// --- UPLOAD ROUTE (SDK Logic) ---
 app.post("/upload", async (c) => {
   try {
     // 1. Get Metadata from URL
@@ -60,38 +60,22 @@ app.post("/upload", async (c) => {
 
     if (!userAddress) return c.json({ error: "Missing userAddress" }, 400);
 
-    console.log(`Stream Request: ${fileName} for ${userAddress}`);
+    console.log(`Processing Upload: ${fileName} for ${userAddress}`);
 
-    // 2. Get the stream (DO NOT await arrayBuffer!)
-    const bodyStream = c.req.raw.body;
-    if (!bodyStream) return c.json({ error: "No body" }, 400);
+    // 2. Load File into Memory (Required for SDK Signing)
+    // Since we are on Koyeb (Docker), we can safely buffer the file
+    const arrayBuffer = await c.req.arrayBuffer();
+    const fileBytes = new Uint8Array(arrayBuffer);
 
-    // 3. STREAM to Walrus (Bypasses CPU Limit)
-    // We stream directly to the publisher HTTP API.
-    // This effectively uses 0 CPU on your backend.
-    const walrusRes = await fetch(`${WALRUS_PUBLISHER}/v1/blobs?epochs=3`, {
-      method: "PUT",
-      body: bodyStream,
-    });
+    if (fileBytes.length === 0)
+      return c.json({ error: "Empty file body" }, 400);
 
-    if (!walrusRes.ok) {
-      const txt = await walrusRes.text();
-      throw new Error(`Walrus Upload Failed: ${txt}`);
-    }
-
-    const walrusJson = await walrusRes.json();
-    // Support both response formats (newlyCreated or direct)
-    const blobId =
-      walrusJson.newlyCreated?.blobObject?.blobId ||
-      walrusJson.blobId ||
-      walrusJson.id;
-
-    if (!blobId) throw new Error("Walrus did not return a Blob ID");
-
-    console.log(`✅ Upload Success. Blob ID: ${blobId}`);
+    // 3. Upload to Walrus (Using YOUR backend wallet & SDK)
+    console.log(`Encrypting & Uploading ${fileBytes.length} bytes...`);
+    const blobId = await uploadToWalrus(fileBytes, fileName);
+    console.log(`✅ Walrus Blob ID: ${blobId}`);
 
     // 4. Mint Receipt (Your Backend Signs This)
-    // This is safe to keep because signing one tx is low CPU.
     const txDigest = await mintBlobReceipt(
       blobId,
       "application/encrypted",
@@ -105,7 +89,7 @@ app.post("/upload", async (c) => {
       await db.collection(COLLECTION_NAME).insertOne({
         ownerAddress: userAddress,
         fileName: fileName.replace(".enc", ""),
-        fileSize: walrusJson.newlyCreated?.blobObject?.size || 0,
+        fileSize: fileBytes.length, // Get size directly from buffer
         algorithm: algorithm,
         blobId: blobId,
         txDigest: txDigest,
@@ -119,7 +103,7 @@ app.post("/upload", async (c) => {
       success: true,
       blobId,
       txDigest,
-      message: "File streamed and receipt minted.",
+      message: "File stored securely and receipt minted.",
     });
   } catch (err: any) {
     console.error("Server Error:", err);
@@ -127,7 +111,24 @@ app.post("/upload", async (c) => {
   }
 });
 
-// ... Keep storage-cost route ...
+// --- STORAGE COST ROUTE ---
+app.get("/storage-cost", async (c) => {
+  try {
+    const sizeParam = c.req.query("fileSize");
+    const epochsParam = c.req.query("epochs");
+
+    if (!sizeParam) return c.json({ error: "fileSize required" }, 400);
+
+    const costs = await calculateWalsForUpload(
+      Number(sizeParam),
+      epochsParam ? Number(epochsParam) : 3,
+    );
+
+    return c.json(costs);
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500);
+  }
+});
 
 const port = Number(Deno.env.get("PORT") ?? 3000);
 Deno.serve({ port }, (req) => app.fetch(req));
