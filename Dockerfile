@@ -1,21 +1,16 @@
-# Use the official Deno image (Alpine is smaller & faster)
+# Use the official Deno image
 FROM denoland/deno:alpine
 
-# Set the working directory inside the container
 WORKDIR /app
 
-# Copy all files from the current directory (mothrbox_ts) into the container
+# Copy all files from the current directory
 COPY . .
 
-# Cache dependencies (speeds up deployment)
-# This downloads all the libraries imported in your main.ts
+# ✅ FIX 1: Point to src/main.ts (not just main.ts)
 RUN deno cache src/main.ts
 
-# Expose the port (Koyeb needs to know where to send traffic)
+# Expose port 3000
 EXPOSE 3000
 
-# Run the Hono server
-# --allow-net: Required for Web Server + Walrus/Sui API calls
-# --allow-env: Required to read SUI_SECRET_KEY, MONGO_URI
-# --allow-read: Required to read files
-CMD ["run", "--allow-net", "--allow-env", "--allow-read", "main.ts"]
+# ✅ FIX 2: Run the file from the src folder
+CMD ["run", "--allow-net", "--allow-env", "--allow-read", "src/main.ts"]
