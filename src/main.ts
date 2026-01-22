@@ -53,62 +53,85 @@ app.use(
 app.get("/", (c) => c.json({ message: "Mothrbox API + MongoDB Active" }));
 
 // --- 1. UPLOAD ROUTE (Updated) ---
+// --- UPDATED STREAMING UPLOAD ROUTE ---
 app.post("/upload", async (c) => {
   try {
-    const body = await c.req.parseBody();
-    const file = body["file"];
-    const userAddress = body["userAddress"] as string;
-    // We expect the frontend to tell us which algo was used, default to AES if missing
-    const algorithm = (body["algorithm"] as string) || "AES-256-GCM";
+    // 1. Get Metadata from URL Query (No parsing body!)
+    const userAddress = c.req.query("userAddress");
+    const fileName = c.req.query("fileName") || "unknown.enc";
+    const algorithm = c.req.query("algorithm") || "AES-256-GCM";
 
-    if (!file || !(file instanceof File)) {
-      return c.json({ error: "Missing 'file' field" }, 400);
-    }
     if (!userAddress) {
-      return c.json({ error: "Missing 'userAddress'" }, 400);
+      return c.json({ error: "Missing 'userAddress' query param" }, 400);
     }
 
-    console.log(`Processing: ${file.name} (${file.size} bytes)`);
+    console.log(`Stream Request: ${fileName} for ${userAddress}`);
 
-    // A. Convert File
-    const arrayBuffer = await file.arrayBuffer();
-    const fileBytes = new Uint8Array(arrayBuffer);
+    // 2. Get Raw Request Body Stream
+    // This is the key fix: We don't load the file. We just get the stream handle.
+    const bodyStream = c.req.raw.body;
 
-    // B. Upload to Walrus
-    const blobId = await uploadToWalrus(fileBytes, file.name);
+    if (!bodyStream) {
+      return c.json({ error: "No file body provided" }, 400);
+    }
+
+    // 3. Stream Directly to Walrus (Bypassing Server Memory)
+    // We pipe the incoming stream directly to the outgoing fetch
+    const walrusRes = await fetch(`${WALRUS_PUBLISHER}/v1/blobs`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: bodyStream, // 👈 Pipe the stream
+    });
+
+    if (!walrusRes.ok) {
+      const err = await walrusRes.text();
+      throw new Error(`Walrus Upload Failed: ${walrusRes.status} ${err}`);
+    }
+
+    const walrusJson = await walrusRes.json();
+    const blobId =
+      walrusJson.newlyCreated?.blobObject?.blobId || walrusJson.blobId;
+
+    if (!blobId) throw new Error("No Blob ID returned from Walrus");
     console.log(`✅ Walrus Blob ID: ${blobId}`);
 
-    // C. Mint Receipt on Sui
-    const txDigest = await mintBlobReceipt(blobId, file.type, userAddress);
+    // 4. Mint Receipt on Sui (Backend pays gas)
+    // Note: We use a placeholder mime-type since we don't have the file object to check
+    const txDigest = await mintBlobReceipt(
+      blobId,
+      "application/encrypted",
+      userAddress,
+    );
     console.log(`✅ Sui Mint Digest: ${txDigest}`);
 
-    // D. Save Metadata to MongoDB 👈 NEW STEP
+    // 5. Save Metadata to MongoDB
     try {
       const db = await getDb();
+      // Estimate size or fetch from walrusJson if available
+      const size = walrusJson.newlyCreated?.blobObject?.size || 0;
+
       const newDoc = {
         ownerAddress: userAddress,
-        fileName: file.name.replace(".enc", ""), // Remove .enc extension for display if desired
-        fileSize: file.size,
+        fileName: fileName.replace(".enc", ""),
+        fileSize: size,
         algorithm: algorithm,
         blobId: blobId,
         txDigest: txDigest,
         status: "Encrypted",
         uploadDate: new Date(),
-        mimeType: file.type,
+        mimeType: "application/encrypted",
       };
 
-      await db.collection(COLLECTION_NAME).insertOne(newDoc);
-      console.log("✅ Saved to MongoDB");
+      await db.collection("user_files").insertOne(newDoc);
     } catch (dbError) {
       console.error("❌ DB Save Failed:", dbError);
-      // We don't fail the request if DB fails, because the blockchain part succeeded
     }
 
     return c.json({
       success: true,
       blobId,
       txDigest,
-      message: "File secure, receipt minting, and metadata saved.",
+      message: "File streamed securely and receipt minted.",
     });
   } catch (err: any) {
     console.error("Upload failed:", err);
